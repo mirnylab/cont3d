@@ -1,33 +1,11 @@
 import polychrom
 import numpy as np 
-import warnings
-import h5py 
-import glob
-from polychrom.simulation import Simulation
-import polychrom.starting_conformations
-import polychrom.forces, polychrom.forcekits
-from polychrom.polymer_analyses import Rg2_scaling, contact_scaling, kabsch_msd
-import simtk.openmm 
-import os 
-import shutil
-import polychrom.polymerutils
-from polychrom.hdf5_format import HDF5Reporter, list_URIs, load_URI, load_hdf5_file, save_hdf5_file
-import matplotlib.pyplot as plt
-import nglutils.nglutils as ngu
-import nglview as nv
-import pandas as pd
-from cooltools.lib import numutils
-from polychrom.contactmaps import monomerResolutionContactMap
-from mirnylib.numutils import observedOverExpected
-from random import randint
-from sklearn.linear_model import LinearRegression
-import pickle
+from polychrom.hdf5_format import load_URI
 from scipy.spatial import ckdtree
-import mirnylib.plotting
-from cooltools import numutils
 from numba import jit
 from multiprocessing import Pool
 from functools import partial
+import polychrom.polymer_analyses
 
 @jit(nopython=True)
 def dense_triplets_from_contacts(N, contacts, triplet_map=None):
@@ -59,7 +37,7 @@ def dense_triplets_from_contacts(N, contacts, triplet_map=None):
         adj_matrix[contacts[i][0]][contacts[i][1]] = 1
         
     i = 0 # start at first contact
-    j = 1 # start at second contact
+    j = 0 # start at first contact
     
     while j < num_contacts:
         while contacts[i][0] == contacts[j][0]:
@@ -71,7 +49,7 @@ def dense_triplets_from_contacts(N, contacts, triplet_map=None):
         # j now has a different first element, we need to increment i and reset j back
         # i goes to next first element
         i += 1
-        j = i + 1
+        j = i
     
     # if a triplet map is given, we can just append to it
     # otherwise we need to create a new one (an expensive operation)
@@ -113,7 +91,7 @@ def sparse_triplets_from_contacts(N, contacts):
         adj_matrix[contacts[i][0]][contacts[i][1]] = 1
         
     i = 0 # start at first contact
-    j = 1 # start at second contact
+    j = 0 # start at first contact
     
     while j < num_contacts:
         while contacts[i][0] == contacts[j][0]:
@@ -125,7 +103,7 @@ def sparse_triplets_from_contacts(N, contacts):
         # j now has a different first element, we need to increment i and reset j back
         # i goes to next first element
         i += 1
-        j = i + 1
+        j = i
     
     return np.array(triplets)
 
@@ -174,6 +152,8 @@ def triplets_from_URI(
     contact_finder: function (optional)
         A function that returns a list of unique contacts from a conformation. 
         E.g. polychrom.polymer_analyses.calculate_contacts
+    cutoff: float
+        Radius cutoff for contactmaps
 
 
     Returns
@@ -199,7 +179,8 @@ def triplets_from_URI(
 def triplets_from_bucket(
     N, 
     bucket, 
-    contact_finder=polychrom.polymer_analyses.calculate_contacts
+    contact_finder=polychrom.polymer_analyses.calculate_contacts,
+    cutoff=5
     ):
     """
     Calculates triplets from a bucket of URI's. This is the code that powers each thread.
@@ -217,6 +198,8 @@ def triplets_from_bucket(
         contact_finder should be specified to keep the size of the map under control. 
         Coursegraining or trimming the coordinate matrix should be included in contact finder.
         E.g. polychrom.polymer_analyses.calculate_contacts (default)
+    cutoff: float
+        Radius cutoff for contactmaps
 
     Returns
     -------
@@ -226,7 +209,7 @@ def triplets_from_bucket(
     triplet_map = np.zeros((N, N, N))
 
     for filename in bucket:
-        triplets_from_URI(N, filename, dense=True, triplet_map=triplet_map, contact_finder=contact_finder)
+        triplets_from_URI(N, filename, dense=True, triplet_map=triplet_map, contact_finder=contact_finder, cutoff=cutoff)
 
     return triplet_map
 
@@ -234,7 +217,8 @@ def triplet_map(
     N,
     URIs,
     n_threads=8,
-    contact_finder=polychrom.polymer_analyses.calculate_contacts
+    contact_finder=polychrom.polymer_analyses.calculate_contacts,
+    cutoff=5
 ):
     """
     Make a triplet map from a list of conformation URIs.
@@ -253,6 +237,8 @@ def triplet_map(
         E.g. polychrom.polymer_analyses.calculate_contacts (default)
     n_threads: int
         Number of threads to use. Defaults to 8.
+    cutoff: float
+        Radius cutoff for contactmaps
 
     Returns
     -------
@@ -262,6 +248,6 @@ def triplet_map(
     URI_buckets = np.array_split(URIs, n_threads)
 
     with Pool(n_threads) as p:    
-        mapped_arrays = p.map(partial(triplets_from_bucket, N, contact_finder=contact_finder), URI_buckets)    
+        mapped_arrays = p.map(partial(triplets_from_bucket, N, contact_finder=contact_finder, cutoff=cutoff), URI_buckets)    
     
     return np.sum(mapped_arrays, axis=0)
